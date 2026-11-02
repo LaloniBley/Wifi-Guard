@@ -1,0 +1,52 @@
+# Пространства имён паттерна. Разделение по зонам доверия:
+#   wg-edge       — периметр: шлюз доступа (единственная точка входа извне);
+#   wg-core       — бизнес- и защитные сервисы: аутентификация, безопасность,
+#                   справочные данные, «Корпоративный портал»;
+#   wg-data       — СУБД Oracle;
+#   wg-monitoring — мониторинг и аудит, Prometheus, Grafana.
+# Метки pod-security.kubernetes.io включают встроенный контроллер Pod Security
+# Admission: в wg-core и wg-monitoring запрещён запуск подов, нарушающих
+# профиль restricted (root, привилегии, лишние capabilities).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wg-edge
+  labels:
+    app.kubernetes.io/part-of: wifi-guard
+    wifi-guard/zone: edge
+    # TTL-зонду нужна capability NET_RAW, которой нет даже в профиле baseline;
+    # поэтому в зоне edge профиль privileged, а нарушения restricted
+    # фиксируются предупреждениями и в журнале аудита API-сервера.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wg-core
+  labels:
+    app.kubernetes.io/part-of: wifi-guard
+    wifi-guard/zone: core
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wg-data
+  labels:
+    app.kubernetes.io/part-of: wifi-guard
+    wifi-guard/zone: data
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wg-monitoring
+  labels:
+    app.kubernetes.io/part-of: wifi-guard
+    wifi-guard/zone: monitoring
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

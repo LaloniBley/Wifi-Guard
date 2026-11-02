@@ -1,0 +1,8 @@
+# Зависимости микросервисов (общие для всех Python-образов, кроме ttl-probe)
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+httpx==0.28.1
+SQLAlchemy==2.0.40
+oracledb==3.1.0
+PyJWT==2.10.1
+prometheus-client==0.21.1

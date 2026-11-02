@@ -1,0 +1,13 @@
+# Удаление паттерна из кластера (кластер minikube сохраняется).
+#   ansible-playbook -i inventory.ini teardown.yml
+- name: Удаление WiFi-Guard
+  hosts: k8s_admin
+  gather_facts: false
+  tasks:
+    - name: Удалить пространства имён паттерна вместе со всеми ресурсами
+      kubernetes.core.k8s:
+        state: absent
+        kind: Namespace
+        name: "{{ item }}"
+        wait: true
+      loop: [wg-edge, wg-core, wg-monitoring, wg-data]

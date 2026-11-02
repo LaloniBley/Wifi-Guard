@@ -1,0 +1,151 @@
+# Плейбук развёртывания паттерна безопасности WiFi-Guard в кластере minikube.
+# Запуск (из каталога ansible/):
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-playbook -i inventory.ini deploy.yml
+# Повторный запуск безопасен (идемпотентен): существующие секреты не меняются.
+- name: Развёртывание паттерна безопасности WiFi-Guard
+  hosts: k8s_admin
+  gather_facts: false
+  tasks:
+    # ---------- 1. Кластер ----------
+    - name: Проверить состояние кластера minikube
+      ansible.builtin.command: minikube status -p {{ minikube_profile }} --format={{ '{{.Host}}' }}
+      register: mk_status
+      changed_when: false
+      failed_when: false
+
+    - name: Запустить minikube с CNI Calico
+      ansible.builtin.command: >
+        minikube start -p {{ minikube_profile }}
+        --driver=docker --cni={{ minikube_cni }}
+        --cpus={{ minikube_cpus }} --memory={{ minikube_memory_mb }}
+        --disk-size={{ minikube_disk }} --kubernetes-version={{ kubernetes_version }}
+      when: mk_status.stdout != "Running"
+
+    - name: Получить IP-адрес узла кластера
+      ansible.builtin.command: minikube ip -p {{ minikube_profile }}
+      register: node_ip
+      changed_when: false
+
+    # ---------- 2. Образы ----------
+    # Образы собираются Docker на машине администратора и явно загружаются в кластер:
+    # так они доступны Kubernetes при любой среде контейнеров minikube (docker или containerd).
+    - name: Собрать образы микросервисов (docker build)
+      ansible.builtin.command:
+        cmd: >
+          docker build -f services/Dockerfile --build-arg SERVICE={{ item }}
+          -t wifi-guard/{{ item }}:{{ app_version }} .
+        chdir: "{{ project_root }}"
+      loop: "{{ services }}"
+
+    - name: Собрать образ TTL-зонда (docker build)
+      ansible.builtin.command:
+        cmd: docker build -f services/ttl-probe/Dockerfile -t wifi-guard/ttl-probe:{{ app_version }} .
+        chdir: "{{ project_root }}"
+
+    - name: Загрузить образы в кластер minikube
+      ansible.builtin.command:
+        cmd: minikube -p {{ minikube_profile }} image load wifi-guard/{{ item }}:{{ app_version }}
+      loop: "{{ services + ['ttl-probe'] }}"
+
+    # ---------- 3. Сертификаты и секреты ----------
+    - name: Выпустить сертификаты учебного УЦ (если ещё не выпущены)
+      ansible.builtin.command:
+        cmd: ./scripts/gen-certs.sh {{ node_ip.stdout }} {{ cert_extra_ips }}
+        chdir: "{{ project_root }}"
+        creates: "{{ project_root }}/certs/server.crt"
+
+    - name: Создать каталог секретов
+      ansible.builtin.file: {path: "{{ secrets_dir }}", state: directory, mode: "0700"}
+
+    - name: Сгенерировать случайные секреты (создаются один раз)
+      ansible.builtin.set_fact:
+        # 48 символов из 62 ≈ 285 бит > 256 бит, требуемых для HS256 (RFC 7518)
+        jwt_secret: "{{ lookup('ansible.builtin.password', secrets_dir + '/jwt chars=ascii_letters,digits length=48') }}"
+        db_sys_password: "{{ lookup('ansible.builtin.password', secrets_dir + '/db_sys chars=ascii_letters,digits length=24') }}"
+        db_app_password: "{{ lookup('ansible.builtin.password', secrets_dir + '/db_app chars=ascii_letters,digits length=24') }}"
+        registry_key: "{{ lookup('ansible.builtin.password', secrets_dir + '/registry chars=ascii_letters,digits length=40') }}"
+        grafana_password: "{{ lookup('ansible.builtin.password', secrets_dir + '/grafana chars=ascii_letters,digits length=20') }}"
+
+    - name: Создать пространства имён
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ project_root }}/deploy/k8s/00-namespaces.yaml"
+
+    - name: Создать секреты Kubernetes
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: "{{ item.name }}", namespace: "{{ item.ns }}"}
+          stringData: "{{ item.data }}"
+      no_log: true          # значения секретов не выводятся в журнал Ansible
+      loop:
+        - {name: wg-jwt, ns: wg-core, data: {secret: "{{ jwt_secret }}"}}
+        - {name: wg-seed-users, ns: wg-core, data: {users: "{{ demo_users }}"}}
+        - {name: wg-registry-admin, ns: wg-core, data: {key: "{{ registry_key }}"}}
+        - {name: wg-registry-admin, ns: wg-edge, data: {key: "{{ registry_key }}"}}
+        - {name: wg-db, ns: wg-core, data: {app-password: "{{ db_app_password }}"}}
+        - {name: wg-db, ns: wg-monitoring, data: {app-password: "{{ db_app_password }}"}}
+        - {name: wg-db, ns: wg-data,
+           data: {sys-password: "{{ db_sys_password }}", app-password: "{{ db_app_password }}"}}
+        - {name: wg-grafana, ns: wg-monitoring, data: {admin-password: "{{ grafana_password }}"}}
+        - name: wg-tls
+          ns: wg-edge
+          data:
+            tls.crt: "{{ lookup('ansible.builtin.file', project_root + '/certs/server.crt') }}"
+            tls.key: "{{ lookup('ansible.builtin.file', project_root + '/certs/server.key') }}"
+            ca.crt: "{{ lookup('ansible.builtin.file', project_root + '/certs/ca.crt') }}"
+
+    # ---------- 4. Манифесты ----------
+    - name: Применить манифесты (kustomize)
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('kubernetes.core.kustomize', dir=project_root + '/deploy/k8s') }}"
+
+    - name: Дождаться готовности СУБД Oracle (первый запуск — скачивание образа и создание БД, до 20 мин)
+      ansible.builtin.command: kubectl -n wg-data rollout status statefulset/oracle --timeout=1200s
+      changed_when: false
+
+    # Образ Oracle создаёт пользователя приложения только при самом первом старте БД.
+    # Если первый запуск прервался (под пересоздан во время инициализации), пользователя нет
+    # и сервисы получают ORA-01017. Шаг создаёт его, если он отсутствует (ORA-01920 = уже есть).
+    - name: Убедиться, что в Oracle есть пользователь приложения WIFIGUARD
+      ansible.builtin.command: >-
+        kubectl -n wg-data exec oracle-0 --
+        bash -c 'createAppUser "$APP_USER" "$APP_USER_PASSWORD" 2>&1'
+      register: app_user
+      changed_when: app_user.rc == 0
+      failed_when: app_user.rc != 0 and 'ORA-01920' not in app_user.stdout
+
+    - name: Перезапустить сервисы с СУБД, если пользователь только что создан
+      ansible.builtin.command: kubectl -n {{ item.ns }} rollout restart deployment/{{ item.name }}
+      loop:
+        - {ns: wg-core, name: auth}
+        - {ns: wg-core, name: registry}
+        - {ns: wg-monitoring, name: audit}
+      when: app_user is changed
+
+    # ожидается условие Available, а не rollout status: пока Oracle создаёт БД, сервисы
+    # с СУБД перезапускаются и Kubernetes помечает деплойменты как «просроченные»
+    - name: Дождаться готовности микросервисов (до 10 мин на каждый)
+      ansible.builtin.command: kubectl -n {{ item.ns }} wait --for=condition=Available deployment/{{ item.name }} --timeout=600s
+      changed_when: false
+      loop:
+        - {ns: wg-core, name: auth}
+        - {ns: wg-core, name: security}
+        - {ns: wg-core, name: registry}
+        - {ns: wg-core, name: portal}
+        - {ns: wg-monitoring, name: audit}
+        - {ns: wg-monitoring, name: prometheus}
+        - {ns: wg-monitoring, name: grafana}
+        - {ns: wg-edge, name: gateway}
+
+    - name: Итог развёртывания
+      ansible.builtin.debug:
+        msg:
+          - "Шлюз доступа: https://{{ node_ip.stdout }}:30443"
+          - "Проверка: python client/client_sim.py --base https://{{ node_ip.stdout }}:30443 --scenario normal"
+          - "Grafana: kubectl -n wg-monitoring port-forward svc/grafana 3000:3000 (admin / пароль в ansible/.secrets/grafana)"

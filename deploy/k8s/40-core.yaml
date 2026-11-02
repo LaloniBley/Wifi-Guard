@@ -1,0 +1,274 @@
+# Начальный реестр доверенных ТД. Эталон hops (ref_hops) задаётся калибровкой:
+#   python client/client_sim.py --scenario calibrate
+# Дальнейший онбординг —
+# через POST /api/admin/aps шлюза с ролью admin.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wg-trusted-aps
+  namespace: wg-core
+data:
+  seed.json: |
+    [
+      {"bssid": "a0:b1:c2:d3:e4:01", "ssid": "CORP-WIFI", "channel": 36,
+       "security": "WPA3-SAE", "pmf_required": true, "ref_hops": null,
+       "location": "Корпус 1, этаж 3"}
+    ]
+---
+# Микросервис аутентификации и верификации
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: wg-core
+  labels: {app.kubernetes.io/name: auth}
+spec:
+  selector: {app.kubernetes.io/name: auth}
+  ports: [{name: http, port: 8001, targetPort: 8001}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  namespace: wg-core
+  labels: {app.kubernetes.io/name: auth, app.kubernetes.io/part-of: wifi-guard}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: auth}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: auth, app.kubernetes.io/part-of: wifi-guard}
+    spec:
+      automountServiceAccountToken: false   # сервису не нужен доступ к API Kubernetes
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: auth
+          image: wifi-guard/auth:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8001, name: http}]
+          env:
+            - {name: PORT, value: "8001"}
+            - {name: DB_HOST, value: oracle.wg-data.svc.cluster.local}
+            - {name: DB_USER, value: WIFIGUARD}
+            - name: DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: wg-db, key: app-password}}
+            - {name: AUDIT_URL, value: http://audit.wg-monitoring.svc.cluster.local:8004}
+            - name: JWT_SECRET
+              valueFrom: {secretKeyRef: {name: wg-jwt, key: secret}}
+            - {name: TOKEN_TTL_SECONDS, value: "900"}     # 15 мин — окно использования перехваченного токена
+            - name: SEED_USERS
+              valueFrom: {secretKeyRef: {name: wg-seed-users, key: users}}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 1, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          startupProbe:                      # до 5 мин на ожидание запуска Oracle
+            httpGet: {path: /healthz, port: 8001}
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8001}
+            timeoutSeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8001}
+            timeoutSeconds: 5
+            periodSeconds: 10
+---
+# Микросервис безопасности (ядро паттерна)
+apiVersion: v1
+kind: Service
+metadata:
+  name: security
+  namespace: wg-core
+  labels: {app.kubernetes.io/name: security}
+spec:
+  selector: {app.kubernetes.io/name: security}
+  ports: [{name: http, port: 8002, targetPort: 8002}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security
+  namespace: wg-core
+  labels: {app.kubernetes.io/name: security, app.kubernetes.io/part-of: wifi-guard}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: security}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: security, app.kubernetes.io/part-of: wifi-guard}
+    spec:
+      automountServiceAccountToken: false   # сервису не нужен доступ к API Kubernetes
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: security
+          image: wifi-guard/security:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8002, name: http}]
+          env:
+            - {name: PORT, value: "8002"}
+            - {name: AUDIT_URL, value: http://audit.wg-monitoring.svc.cluster.local:8004}
+            - {name: REGISTRY_URL, value: http://registry.wg-core.svc.cluster.local:8003}
+            - {name: AUTH_URL, value: http://auth.wg-core.svc.cluster.local:8001}
+            - {name: SUSPICIOUS_THRESHOLD, value: "0.4"}
+            - {name: BLOCK_THRESHOLD, value: "0.8"}
+            - {name: HOPS_TOLERANCE, value: "0"}
+            - {name: REGISTRY_CACHE_SECONDS, value: "30"}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          startupProbe:                      # до 5 мин на ожидание запуска Oracle
+            httpGet: {path: /healthz, port: 8002}
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8002}
+            timeoutSeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8002}
+            timeoutSeconds: 5
+            periodSeconds: 10
+---
+# Микросервис справочных данных и реестров
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: wg-core
+  labels: {app.kubernetes.io/name: registry}
+spec:
+  selector: {app.kubernetes.io/name: registry}
+  ports: [{name: http, port: 8003, targetPort: 8003}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: wg-core
+  labels: {app.kubernetes.io/name: registry, app.kubernetes.io/part-of: wifi-guard}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: registry}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: registry, app.kubernetes.io/part-of: wifi-guard}
+    spec:
+      automountServiceAccountToken: false   # сервису не нужен доступ к API Kubernetes
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: registry
+          image: wifi-guard/registry:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8003, name: http}]
+          env:
+            - {name: PORT, value: "8003"}
+            - {name: DB_HOST, value: oracle.wg-data.svc.cluster.local}
+            - {name: DB_USER, value: WIFIGUARD}
+            - name: DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: wg-db, key: app-password}}
+            - name: REGISTRY_ADMIN_KEY
+              valueFrom: {secretKeyRef: {name: wg-registry-admin, key: key}}
+            - name: SEED_APS
+              valueFrom: {configMapKeyRef: {name: wg-trusted-aps, key: seed.json}}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          startupProbe:                      # до 5 мин на ожидание запуска Oracle
+            httpGet: {path: /healthz, port: 8003}
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8003}
+            timeoutSeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8003}
+            timeoutSeconds: 5
+            periodSeconds: 10
+---
+# Защищаемое приложение «Корпоративный портал»
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal
+  namespace: wg-core
+  labels: {app.kubernetes.io/name: portal}
+spec:
+  selector: {app.kubernetes.io/name: portal}
+  ports: [{name: http, port: 8000, targetPort: 8000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal
+  namespace: wg-core
+  labels: {app.kubernetes.io/name: portal, app.kubernetes.io/part-of: wifi-guard}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: portal}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: portal, app.kubernetes.io/part-of: wifi-guard}
+    spec:
+      automountServiceAccountToken: false   # сервису не нужен доступ к API Kubernetes
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: portal
+          image: wifi-guard/portal:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8000, name: http}]
+          env:
+            - {name: PORT, value: "8000"}
+
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          startupProbe:                      # до 5 мин на ожидание запуска Oracle
+            httpGet: {path: /healthz, port: 8000}
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            timeoutSeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            timeoutSeconds: 5
+            periodSeconds: 10

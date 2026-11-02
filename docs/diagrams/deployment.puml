@@ -1,0 +1,52 @@
+@startuml
+' Рисунок 15 – Схема развертывания паттерна в кластере Kubernetes
+skinparam defaultFontName "Liberation Serif"
+skinparam defaultFontSize 13
+skinparam shadowing false
+skinparam monochrome true
+skinparam nodesep 40
+skinparam ranksep 55
+skinparam rectangle {
+  RoundCorner 6
+}
+top to bottom direction
+
+actor "Клиент\n(ноутбук / смартфон)" as client
+
+node "Узел minikube (Docker, CNI Calico)" as k8s {
+  rectangle "Namespace wg-edge\nPSA: privileged (warn: restricted)" as edge {
+    rectangle "Pod gateway\n----\nnginx :8443 (mTLS)\ngateway 127.0.0.1:8080\nttl-probe 127.0.0.1:9100 [NET_RAW]" as gw
+  }
+  rectangle "Namespace wg-core\nPSA: restricted" as core {
+    rectangle "auth\n:8001" as auth
+    rectangle "security\n:8002" as sec
+    rectangle "registry\n:8003" as reg
+    rectangle "portal\n:8000" as portal
+  }
+  rectangle "Namespace wg-data\nPSA: baseline" as data {
+    database "oracle (StatefulSet)\n:1521, PVC 10 Gi" as ora
+  }
+  rectangle "Namespace wg-monitoring\nPSA: restricted" as mon {
+    rectangle "audit\n:8004" as audit
+    rectangle "prometheus\n:9090" as prom
+    rectangle "grafana\n:3000" as graf
+  }
+}
+
+client --> gw : HTTPS NodePort 30443\n(externalTrafficPolicy: Local)
+gw --> auth : 8001
+gw --> sec : 8002
+gw --> reg : 8003
+gw --> portal : 8000
+sec --> reg : 8003
+sec --> auth : 8001
+auth --> ora : 1521
+reg --> ora : 1521
+audit --> ora : 1521
+gw ..> audit : 8004
+auth ..> audit : 8004
+sec ..> audit : 8004
+prom --> audit : 8004 /metrics
+graf --> prom : 9090
+
+@enduml

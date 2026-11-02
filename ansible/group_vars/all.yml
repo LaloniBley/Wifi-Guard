@@ -1,0 +1,25 @@
+# Параметры развёртывания паттерна WiFi-Guard
+project_root: "{{ playbook_dir }}/.."
+app_version: "1.0.0"
+
+# Ресурсы узла minikube. 8 ГБ ОЗУ: Oracle Free до 3 ГБ (лимит пода),
+# 6 Python-контейнеров по ≤256 МБ (~1,5 ГБ), Prometheus+Grafana ≤0,75 ГБ,
+# системные компоненты Kubernetes и Calico ~1,5 ГБ, остальное — запас.
+minikube_profile: wifi-guard
+minikube_cpus: 4
+minikube_memory_mb: 8192
+minikube_disk: 30g
+minikube_cni: calico          # CNI с поддержкой NetworkPolicy
+kubernetes_version: v1.31.0
+
+services: [gateway, auth, security, registry, audit, portal]
+
+# дополнительные IP-адреса в сертификате шлюза (через запятую), например IP ВМ
+# в сети host-only VirtualBox: "192.168.56.10". Задать ДО первого запуска плейбука.
+cert_extra_ips: "192.168.56.10"
+
+# каталог для сгенерированных секретов (не попадает в git, см. .gitignore)
+secrets_dir: "{{ playbook_dir }}/.secrets"
+
+# демонстрационные учётные записи (пароли можно переопределить: -e)
+demo_users: "ivanov:Ivanov#2026:user;admin:Admin#2026:admin"

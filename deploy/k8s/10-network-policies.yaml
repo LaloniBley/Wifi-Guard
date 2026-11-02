@@ -1,0 +1,230 @@
+# Сетевые политики (NetworkPolicy) — реализация принципа нулевого доверия
+# внутри кластера. В каждом пространстве имён по умолчанию запрещён весь
+# входящий и исходящий трафик, затем явно разрешаются только связи,
+# показанные на C4-диаграмме (рис. 5). Требуется CNI с поддержкой политик
+# (в minikube — Calico: minikube start --cni=calico).
+
+# ---------- 1. Запрет по умолчанию + DNS для всех зон ----------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-all, namespace: wg-edge}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-all, namespace: wg-core}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-all, namespace: wg-data}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-all, namespace: wg-monitoring}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-dns, namespace: wg-edge}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-dns, namespace: wg-core}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-dns, namespace: wg-monitoring}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+# ---------- 2. Зона edge: шлюз доступа ----------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: gateway, namespace: wg-edge}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: gateway}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8443}]          # только HTTPS, от любых клиентов
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-core}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: auth}}
+      ports: [{protocol: TCP, port: 8001}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-core}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: security}}
+      ports: [{protocol: TCP, port: 8002}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-core}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: registry}}
+      ports: [{protocol: TCP, port: 8003}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-core}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: portal}}
+      ports: [{protocol: TCP, port: 8000}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-monitoring}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: audit}}
+      ports: [{protocol: TCP, port: 8004}]
+---
+# ---------- 3. Зона core ----------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: auth, namespace: wg-core}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: auth}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-edge}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: gateway}}
+        - podSelector: {matchLabels: {app.kubernetes.io/name: security}}   # отзыв сессий
+      ports: [{protocol: TCP, port: 8001}]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-data}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: oracle}}
+      ports: [{protocol: TCP, port: 1521}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-monitoring}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: audit}}
+      ports: [{protocol: TCP, port: 8004}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: security, namespace: wg-core}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: security}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-edge}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: gateway}}
+      ports: [{protocol: TCP, port: 8002}]
+  egress:
+    - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: registry}}}]
+      ports: [{protocol: TCP, port: 8003}]
+    - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: auth}}}]
+      ports: [{protocol: TCP, port: 8001}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-monitoring}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: audit}}
+      ports: [{protocol: TCP, port: 8004}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: registry, namespace: wg-core}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: registry}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: security}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-edge}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: gateway}}  # онбординг ТД
+      ports: [{protocol: TCP, port: 8003}]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-data}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: oracle}}
+      ports: [{protocol: TCP, port: 1521}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: portal, namespace: wg-core}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: portal}}
+  policyTypes: [Ingress]           # исходящий трафик закрыт политикой default-deny-all
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-edge}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: gateway}}
+      ports: [{protocol: TCP, port: 8000}]
+---
+# ---------- 4. Зона data: СУБД доступна только сервисам с собственными таблицами ----------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: oracle, namespace: wg-data}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: oracle}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-core}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: auth}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-core}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: registry}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-monitoring}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: audit}}
+      ports: [{protocol: TCP, port: 1521}]
+---
+# ---------- 5. Зона monitoring ----------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: audit, namespace: wg-monitoring}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: audit}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-edge}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: gateway}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-core}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: auth}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-core}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: security}}
+        - podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}
+      ports: [{protocol: TCP, port: 8004}]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: wg-data}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: oracle}}
+      ports: [{protocol: TCP, port: 1521}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: prometheus, namespace: wg-monitoring}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: grafana}}}]
+      ports: [{protocol: TCP, port: 9090}]
+  egress:
+    - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: audit}}}]
+      ports: [{protocol: TCP, port: 8004}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: grafana, namespace: wg-monitoring}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: grafana}}
+  policyTypes: [Egress]            # входящий доступ — только kubectl port-forward
+  egress:
+    - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}}]
+      ports: [{protocol: TCP, port: 9090}]

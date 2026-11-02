@@ -1,0 +1,61 @@
+# СУБД Oracle Database 23ai Free (образ gvenzl/oracle-free).
+# Ограничения редакции Free: до 2 ГБ ОЗУ, 2 потока ЦП, 12 ГБ пользовательских
+# данных — отсюда запросы/лимиты ресурсов и размер тома.
+apiVersion: v1
+kind: Service
+metadata:
+  name: oracle
+  namespace: wg-data
+  labels: {app.kubernetes.io/name: oracle}
+spec:
+  selector: {app.kubernetes.io/name: oracle}
+  ports: [{name: sqlnet, port: 1521, targetPort: 1521}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: oracle
+  namespace: wg-data
+  labels: {app.kubernetes.io/name: oracle, app.kubernetes.io/part-of: wifi-guard}
+spec:
+  serviceName: oracle
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: oracle}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: oracle, app.kubernetes.io/part-of: wifi-guard}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 54321                    # группа oracle в образе: право записи на том
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: oracle
+          image: gvenzl/oracle-free:23-slim
+          ports: [{containerPort: 1521, name: sqlnet}]
+          env:
+            - name: ORACLE_PASSWORD
+              valueFrom: {secretKeyRef: {name: wg-db, key: sys-password}}
+            - name: APP_USER                # схема приложения создаётся при первом запуске
+              value: WIFIGUARD
+            - name: APP_USER_PASSWORD
+              valueFrom: {secretKeyRef: {name: wg-db, key: app-password}}
+          resources:
+            requests: {cpu: 500m, memory: 2Gi}
+            limits: {cpu: "2", memory: 3Gi}  # 2 ГБ под экземпляр БД + запас на процессы ОС
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            exec: {command: [healthcheck.sh]}
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+          volumeMounts:
+            - {name: oradata, mountPath: /opt/oracle/oradata}
+  volumeClaimTemplates:
+    - metadata: {name: oradata}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 10Gi}}   # файлы БД (~3 ГБ) + данные + журналы

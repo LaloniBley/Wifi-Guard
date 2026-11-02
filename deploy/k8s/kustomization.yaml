@@ -1,0 +1,29 @@
+# Сборка всех манифестов паттерна: kubectl apply -k deploy/k8s
+# Секреты (wg-jwt, wg-db, wg-registry-admin, wg-seed-users, wg-tls, wg-grafana)
+# в репозиторий не входят — их создаёт плейбук Ansible.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespaces.yaml
+  - 10-network-policies.yaml
+  - 30-oracle.yaml
+  - 40-core.yaml
+  - 50-gateway.yaml
+  - 60-audit.yaml
+  - 70-prometheus-grafana.yaml
+configMapGenerator:
+  - name: gateway-nginx
+    namespace: wg-edge
+    files: [nginx.conf]
+generatorOptions:
+  disableNameSuffixHash: true
+# образы собираются в minikube (Ansible); чтобы брать опубликованные GitHub Actions
+# образы из ghcr.io, задайте newName: ghcr.io/lalonibley/wifi-guard-<сервис>:
+images:
+  - {name: wifi-guard/gateway, newTag: 1.0.0}
+  - {name: wifi-guard/ttl-probe, newTag: 1.0.0}
+  - {name: wifi-guard/auth, newTag: 1.0.0}
+  - {name: wifi-guard/security, newTag: 1.0.0}
+  - {name: wifi-guard/registry, newTag: 1.0.0}
+  - {name: wifi-guard/portal, newTag: 1.0.0}
+  - {name: wifi-guard/audit, newTag: 1.0.0}

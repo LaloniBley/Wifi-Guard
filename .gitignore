@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+# ключи и сертификаты учебного УЦ, сгенерированные секреты
+certs/
+ansible/.secrets/
+*.db
+.ruff_cache/

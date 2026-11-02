@@ -1,0 +1,112 @@
+# Шлюз доступа: под из трёх контейнеров, разделяющих сетевое пространство пода.
+#   nginx     — TLS/mTLS-терминатор, порт 8443 (единственный открытый порт);
+#   gateway   — FastAPI-шлюз, слушает только 127.0.0.1:8080;
+#   ttl-probe — TTL-зонд, слушает только 127.0.0.1:9100, capability NET_RAW.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: wg-edge
+  labels: {app.kubernetes.io/name: gateway}
+spec:
+  type: NodePort
+  # Local: kube-proxy не подменяет адрес источника (SNAT), поэтому шлюз
+  # и TTL-зонд видят реальный IP клиента и TTL его пакетов
+  externalTrafficPolicy: Local
+  selector: {app.kubernetes.io/name: gateway}
+  ports:
+    - {name: https, port: 443, targetPort: 8443, nodePort: 30443}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: wg-edge
+  labels: {app.kubernetes.io/name: gateway, app.kubernetes.io/part-of: wifi-guard}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: gateway}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: gateway, app.kubernetes.io/part-of: wifi-guard}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          ports: [{containerPort: 8443, name: https}]
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8443, scheme: HTTPS}
+            timeoutSeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - {name: nginx-conf, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf}
+            - {name: tls, mountPath: /etc/wg/tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+        - name: gateway
+          image: wifi-guard/gateway:1.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: HOST, value: "127.0.0.1"}     # недоступен из сети, только через nginx
+            - {name: PORT, value: "8080"}
+            - {name: AUTH_URL, value: http://auth.wg-core.svc.cluster.local:8001}
+            - {name: SECURITY_URL, value: http://security.wg-core.svc.cluster.local:8002}
+            - {name: REGISTRY_URL, value: http://registry.wg-core.svc.cluster.local:8003}
+            - {name: PORTAL_URL, value: http://portal.wg-core.svc.cluster.local:8000}
+            - {name: AUDIT_URL, value: http://audit.wg-monitoring.svc.cluster.local:8004}
+            - {name: TTL_PROBE_URL, value: http://127.0.0.1:9100}
+            - name: REGISTRY_ADMIN_KEY
+              valueFrom: {secretKeyRef: {name: wg-registry-admin, key: key}}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          livenessProbe:
+            exec:
+              command: [python, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+            timeoutSeconds: 10
+            periodSeconds: 20
+        - name: ttl-probe
+          image: wifi-guard/ttl-probe:1.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: WATCH_PORT, value: "8443"}
+            - {name: PROBE_PORT, value: "9100"}
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          securityContext:
+            runAsUser: 0                           # сырые сокеты требуют root + NET_RAW
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL], add: [NET_RAW]}
+          livenessProbe:
+            exec:
+              command: [python, -c, "import urllib.request as u; u.urlopen('http://127.0.0.1:9100/healthz', timeout=2)"]
+            timeoutSeconds: 10
+            periodSeconds: 20
+      volumes:
+        - name: nginx-conf
+          configMap: {name: gateway-nginx}
+        - name: tls
+          secret: {secretName: wg-tls}             # tls.crt, tls.key, ca.crt
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
