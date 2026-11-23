@@ -118,6 +118,10 @@ class Runner:
         self.ctx = tls_context(a.ca, (a.cert, a.key))
         self.client = httpx.Client(base_url=a.base, verify=self.ctx, timeout=10, trust_env=False)
 
+    def reconnect(self) -> None:
+        self.client.close()
+        self.client = httpx.Client(base_url=self.a.base, verify=self.ctx, timeout=10, trust_env=False)
+
     def login(self, telemetry: str, password: str | None = None) -> httpx.Response:
         return self.client.post("/api/login", headers={"X-WG-Telemetry": telemetry},
                                 json={"username": self.a.user,
@@ -168,16 +172,25 @@ def rate_line(what: str, k: int, n: int) -> None:
 def summarize(scenario: str, label: str, rows: list[dict]) -> None:
     n = len(rows)
     counts = Counter(r["outcome"] for r in rows)
-    lat = sorted(r["latency_ms"] for r in rows)
+    lat = sorted(r["latency_ms"] for r in rows if not r["outcome"].startswith("NET_ERROR"))
     print(f"\n=== {scenario} | {label} | попыток: {n}")
     for name, k in counts.most_common():
         print(f"  {name:<34}{k:>5}  {k / n:7.1%}")
+    # сбои сети и тайм-ауты учитываются отдельно: это вопрос доступности стенда,
+    # а не решения паттерна; доли решений считаются по завершённым попыткам
+    failed = sum(k for name, k in counts.items() if name.startswith("NET_ERROR"))
+    if failed:
+        rate_line("сбои сети и тайм-ауты (ответ не получен)", failed, n)
+        n -= failed
+        print(f"  доли ниже — по {n} попыткам, на которые получен ответ")
+    if n == 0:
+        return
     if scenario in LEGITIMATE:
         rate_line("ложные срабатывания (исход не ALLOW)", n - counts["ALLOW"], n)
     else:
         rate_line("атака не обнаружена (исход ALLOW)", counts["ALLOW"], n)
         rate_line("атака не предотвращена (доступ получен)", counts["ALLOW"] + counts["SUSPICIOUS"], n)
-    p95 = lat[max(0, math.ceil(0.95 * n) - 1)]
+    p95 = lat[max(0, math.ceil(0.95 * len(lat)) - 1)]
     print(f"  время ответа, мс: среднее {statistics.mean(lat):.1f}, медиана {statistics.median(lat):.1f}, "
           f"95-й процентиль {p95:.1f}, максимум {lat[-1]:.1f}")
 
@@ -209,7 +222,15 @@ def main() -> None:
 
     rows = []
     for i in range(1, a.runs + 1):
-        stage, result, ms = runner.attempt(a.scenario, i)
+        started = time.perf_counter()
+        try:
+            stage, result, ms = runner.attempt(a.scenario, i)
+        except httpx.TransportError as exc:
+            # сбой сети или тайм-аут ответа (10 с) — это тоже результат испытания:
+            # попытка фиксируется, соединения открываются заново, серия продолжается
+            stage, result = "network", f"NET_ERROR:{type(exc).__name__}"
+            ms = (time.perf_counter() - started) * 1000
+            runner.reconnect()
         rows.append({"scenario": a.scenario, "label": a.label, "run": i, "stage": stage,
                      "outcome": result, "latency_ms": round(ms, 2),
                      "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
