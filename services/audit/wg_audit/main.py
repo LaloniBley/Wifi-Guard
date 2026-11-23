@@ -83,6 +83,27 @@ class Metrics:
         self.latency = Histogram("wg_gateway_latency_seconds", "Время обработки запроса шлюзом",
                                  buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0),
                                  registry=self.registry)
+        self._init_series()
+
+    def _init_series(self) -> None:
+        """Создаёт все ожидаемые ряды счётчиков с нулевым значением.
+
+        Функция increase() в Prometheus вычисляет прирост между двумя замерами.
+        Если ряд появляется сразу со значением 1 (первая атака), предыдущего
+        замера нет, и первое событие не попадает ни на дашборд, ни в правила
+        оповещения. Нулевые ряды, созданные при старте, устраняют этот пропуск.
+        """
+        for verdict in ("ALLOW", "SUSPICIOUS", "BLOCK"):
+            for mode in ("login", "request"):
+                self.verdicts.labels(verdict, mode)
+        for indicator in ("BSSID_UNTRUSTED", "PMF_NOT_NEGOTIATED", "HOPS_DEVIATION", "TWIN_IN_AIR"):
+            for scenario in ("C1", "C2"):
+                self.indicators.labels(indicator, scenario)
+        for reason in ("bad_credentials", "token_expired", "token_invalid", "no_client_certificate",
+                       "binding_mismatch", "unknown_session", "session_revoked"):
+            self.auth_failures.labels(reason)
+        for status in ("200", "401", "403", "503"):
+            self.requests.labels(status)
 
     def observe(self, ev: EventIn) -> None:
         extra = ev.model_extra or {}

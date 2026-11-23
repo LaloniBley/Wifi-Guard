@@ -1,12 +1,14 @@
 # WiFi-Guard — паттерн безопасности приложения при угрозе подмены беспроводного клиента или точки доступа
 
-Программная часть курсовой работы (глава 3). Пять микросервисов на Python 3.12 + FastAPI,
-развертывание в Kubernetes (minikube) с помощью Ansible.
+Программная часть курсовой работы (главы 3 и 4). Пять микросервисов на Python 3.12 + FastAPI,
+развертывание в Kubernetes (minikube) с помощью Ansible, мониторинг в Prometheus и Grafana.
 
 Репозиторий: https://github.com/LaloniBley/Wifi-Guard
 
 > Развертывание на виртуальной машине VirtualBox с нуля (установка Ubuntu, Docker, minikube, проверки и
 > скриншоты для отчёта) — в [docs/GUIDE-VirtualBox.md](docs/GUIDE-VirtualBox.md).
+> Испытательный стенд из трёх ВМ (нарушитель, пользователь, сервер), серии атак и мониторинг (глава 4) —
+> в [docs/GUIDE-chapter4.md](docs/GUIDE-chapter4.md).
 
 Паттерн защищает приложение «Корпоративный портал» от угрозы **УБИ.126** БДУ ФСТЭК России:
 
@@ -74,12 +76,20 @@ wifi-guard/
 │   ├── registry/wg_registry/  справочные данные: реестр доверенных ТД
 │   ├── audit/wg_audit/        мониторинг и аудит: журнал + метрики Prometheus
 │   └── portal/wg_portal/      защищаемое приложение «Корпоративный портал»
-├── client/client_sim.py       симулятор клиентской части (легитимный клиент и атаки)
-├── tests/                     34 автотеста pytest
+├── client/
+│   ├── client_sim.py          симулятор клиентской части (легитимный клиент и атаки)
+│   ├── experiment.py          серийные испытания: 100 попыток сценария, доли исходов, время ответа
+│   └── test_cluster.py        системные тесты pytest на развёрнутом кластере (WG_BASE=https://…)
+├── tests/                     37 автотестов pytest (без кластера); tests/prometheus — тесты правил promtool
 ├── deploy/k8s/                манифесты Kubernetes (kustomize)
+│   └── monitoring/            Prometheus: конфигурация и правила (wg-rules.yml); Grafana: дашборд
 ├── ansible/                   плейбуки развертывания и удаления
-├── scripts/                  gen-certs.sh — сертификаты УЦ; expose-gateway.sh — публикация шлюза на IP ВМ
+├── scripts/                  gen-certs.sh — сертификаты УЦ; expose-gateway.sh — публикация шлюза на IP ВМ;
+│                              build-dashboard.py — генерация дашборда Grafana
+│   └── lab/                   стенд главы 4: rogue-ap.sh (ВМ нарушителя), wifi.sh (ВМ пользователя),
+│                              alert-times.py (время срабатывания оповещений)
 ├── docs/GUIDE-VirtualBox.md  гайд: развертывание на ВМ VirtualBox с нуля
+├── docs/GUIDE-chapter4.md    гайд: испытательный стенд, тестирование и мониторинг (глава 4)
 ├── docs/diagrams/             исходники блок-схем (ГОСТ 19.701-90) и схемы развертывания
 └── .github/workflows/ci.yml   CI/CD: тесты, проверка манифестов, сборка образов в GHCR
 ```
@@ -147,6 +157,15 @@ wifi-guard/
 `POST /events` — сохраняет событие в `WG_AUDIT_EVENTS` и обновляет метрики; `GET /events` — журнал;
 `GET /metrics` — для Prometheus. Метрики: `wg_verdicts_total`, `wg_indicators_total`, `wg_auth_failures_total`,
 `wg_sessions_revoked_total`, `wg_gateway_requests_total`, `wg_risk_score`, `wg_gateway_latency_seconds`.
+Все ожидаемые ряды счётчиков создаются при старте с нулём, чтобы первое же событие учитывалось функцией
+`increase()` в Prometheus.
+
+Prometheus вычисляет по ним показатели безопасности (доля блокировок, доля подозрительных запросов, попытки
+использовать чужой токен, 95-й процентиль задержки шлюза) и девять правил оповещения: подменная ТД, двойник
+в эфире, изменение маршрута, чужой и поддельный токен, перебор паролей, отказ «закрыт при сбое», медленный шлюз,
+недоступность аудита (`deploy/k8s/monitoring/wg-rules.yml`). Grafana при запуске загружает дашборд
+«WiFi-Guard — метрики безопасности» (`deploy/k8s/monitoring/wifi-guard-security.json`, генерируется
+`scripts/build-dashboard.py`).
 
 ### 3.6. Портал (`services/portal`) и симулятор (`client/client_sim.py`)
 Портал отвечает только на запросы с заголовком `X-WG-User` от шлюза. Симулятор формирует телеметрию и
@@ -158,7 +177,7 @@ wifi-guard/
 
 ```bash
 source .venv/bin/activate
-pytest -q          # 34 теста: правила, токены, TTL, сквозные сценарии С1/С2
+pytest -q          # 37 тестов: правила, токены, TTL, метрики, сквозные сценарии С1/С2
 ```
 
 Все сервисы поднимаются в одном процессе, вместо Oracle — SQLite в памяти.
@@ -219,7 +238,7 @@ kubectl -n wg-monitoring port-forward svc/grafana 3000:3000     # http://localho
 
 ---
 
-## 6. Postman (глава 4)
+## 6. Postman
 
 1. `kubectl -n wg-edge port-forward svc/gateway 8443:443 --address 0.0.0.0` (в Ubuntu).
 2. В Postman: Settings → Certificates → Add Certificate: host `localhost:8443`, PFX-файл `certs/user1.p12`, пароль `wifiguard`;

@@ -88,3 +88,33 @@ def test_expired_and_forged_tokens():
             raise AssertionError
         except TokenError as err:
             assert err.reason == reason
+
+
+def test_audit_series_start_at_zero():
+    # без нулевых рядов первая атака не видна функции increase() в Prometheus
+    from wg_audit.main import Metrics
+    from prometheus_client import generate_latest
+    text = generate_latest(Metrics().registry).decode()
+    assert 'wg_verdicts_total{mode="request",verdict="BLOCK"} 0.0' in text
+    assert 'wg_indicators_total{indicator="TWIN_IN_AIR",scenario="C1"} 0.0' in text
+    assert 'wg_auth_failures_total{reason="binding_mismatch"} 0.0' in text
+
+
+def test_forged_token_fails_signature_check():
+    from experiment import forge
+    token, _ = issue_token(SECRET, "ivanov", "user", "fp", None, None, 600)
+    forged = forge(token)
+    assert forged.split(".")[2] == token.split(".")[2]      # подпись не изменена
+    try:
+        check_token(SECRET, forged, "fp")
+        raise AssertionError
+    except TokenError as err:
+        assert err.reason == "token_invalid"
+
+
+def test_upper_bound_rule_of_three():
+    from experiment import upper_bound
+    # 0 ошибок из 100: доля ошибок с вероятностью 95 % не больше 3 %
+    assert abs(upper_bound(0, 100) - (1 - 0.05 ** (1 / 100))) < 1e-9
+    assert 0.029 < upper_bound(0, 100) < 0.030
+    assert upper_bound(5, 100) > 0.05

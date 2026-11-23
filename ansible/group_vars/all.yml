@@ -16,7 +16,7 @@ services: [gateway, auth, security, registry, audit, portal]
 
 # дополнительные IP-адреса в сертификате шлюза (через запятую), например IP ВМ
 # в сети host-only VirtualBox: "192.168.56.10". Задать ДО первого запуска плейбука.
-cert_extra_ips: "192.168.56.10"
+cert_extra_ips: ""
 
 # каталог для сгенерированных секретов (не попадает в git, см. .gitignore)
 secrets_dir: "{{ playbook_dir }}/.secrets"

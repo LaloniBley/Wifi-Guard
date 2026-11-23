@@ -105,6 +105,15 @@
         state: present
         definition: "{{ lookup('kubernetes.core.kustomize', dir=project_root + '/deploy/k8s') }}"
 
+    # до главы 4 конфигурация мониторинга хранилась в ConfigMap без хеша в имени
+    - name: Удалить устаревшие ConfigMap мониторинга
+      kubernetes.core.k8s:
+        state: absent
+        kind: ConfigMap
+        namespace: wg-monitoring
+        name: "{{ item }}"
+      loop: [prometheus-config, grafana-datasources]
+
     - name: Дождаться готовности СУБД Oracle (первый запуск — скачивание образа и создание БД, до 20 мин)
       ansible.builtin.command: kubectl -n wg-data rollout status statefulset/oracle --timeout=1200s
       changed_when: false
@@ -148,4 +157,5 @@
         msg:
           - "Шлюз доступа: https://{{ node_ip.stdout }}:30443"
           - "Проверка: python client/client_sim.py --base https://{{ node_ip.stdout }}:30443 --scenario normal"
-          - "Grafana: kubectl -n wg-monitoring port-forward svc/grafana 3000:3000 (admin / пароль в ansible/.secrets/grafana)"
+          - "Grafana: kubectl -n wg-monitoring port-forward --address 0.0.0.0 svc/grafana 3000:3000 (admin / пароль в ansible/.secrets/grafana), дашборд «WiFi-Guard — метрики безопасности»"
+          - "Prometheus: kubectl -n wg-monitoring port-forward --address 0.0.0.0 svc/prometheus 9090:9090 (правила и оповещения — вкладка Alerts)"

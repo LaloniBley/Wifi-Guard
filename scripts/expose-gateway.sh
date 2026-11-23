@@ -21,11 +21,16 @@ sudo sysctl -qw net.ipv4.ip_forward=1
 sudo iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport "$PORT" \
   -j DNAT --to-destination "$TARGET" 2>/dev/null || true
 sudo iptables -D DOCKER-USER -i "$IFACE" -p tcp -d "$NODE" --dport 30443 -j ACCEPT 2>/dev/null || true
+sudo iptables -D DOCKER-USER -i "$IFACE" -d "$NODE" -j DROP 2>/dev/null || true
 
 # 1) входящие на <IP ВМ>:8443 перенаправляются на NodePort шлюза в minikube
 sudo iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport "$PORT" \
   -j DNAT --to-destination "$TARGET"
-# 2) Docker по умолчанию запрещает пересылку в свои сети — разрешаем только этот поток
+# 2) из внешней сети к узлу кластера пропускается только поток к шлюзу: остальные
+#    порты узла (API Kubernetes, kubelet, SSH узла) закрыты, даже если нарушитель
+#    направит трафик в сеть кластера через эту ВМ (испытание Э12 главы 4).
+#    Правила вставляются в начало цепочки, поэтому ACCEPT добавляется последним.
+sudo iptables -I DOCKER-USER -i "$IFACE" -d "$NODE" -j DROP
 sudo iptables -I DOCKER-USER -i "$IFACE" -p tcp -d "$NODE" --dport 30443 -j ACCEPT
 
 IP="$(ip -4 -o addr show "$IFACE" | awk '{print $4}' | cut -d/ -f1)"

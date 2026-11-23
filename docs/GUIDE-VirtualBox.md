@@ -285,9 +285,9 @@ cd ~/wifi-guard && pytest -v
 ruff check common services client tests
 ```
 
-Ожидается `34 passed` и `All checks passed!`.
+Ожидается `37 passed` (34 теста главы 3 и 3 теста, добавленные в главе 4) и `All checks passed!`.
 
-📸 **Скриншот 1:** последние строки `pytest -v` с `34 passed`.
+📸 **Скриншот 1:** последние строки `pytest -v` с `37 passed`.
 
 ---
 
@@ -340,6 +340,7 @@ cd ~/wifi-guard/ansible && ansible-playbook -i inventory.ini deploy.yml
 | Запустить minikube с CNI Calico | 5–15 мин | ничего, ждать |
 | Собрать образы / Загрузить образы в кластер | 5–10 мин | по строке на каждый образ |
 | Дождаться готовности СУБД Oracle | до 20 мин | ничего — качается образ ~1,5–2 ГБ и создаётся БД |
+| Убедиться, что в Oracle есть пользователь приложения | секунды | `ok` (пользователь уже есть) или `changed` (создан) |
 | Дождаться готовности микросервисов | 1–5 мин | `ok` по каждому сервису |
 
 Пока плейбук молчит, во **втором окне SSH** можно смотреть, что происходит:
@@ -354,6 +355,9 @@ watch -n 5 kubectl get pods -A
 
 📸 **Скриншот 2:** `PLAY RECAP` и «Итог развёртывания».
 
+> **Не удаляй под `oracle-0`, пока база создаётся** (`kubectl -n wg-data logs oracle-0` ещё не показал
+> `DATABASE IS READY TO USE!`), если только он не в `ImagePullBackOff`.
+>
 > Если плейбук всё-таки упал на ожидании Oracle или сервисов: дождись, пока `kubectl get pods -A` покажет у
 > всех подов `wg-*` READY `1/1` (у gateway `3/3`), и запусти плейбук ещё раз — это безопасно.
 
@@ -579,7 +583,7 @@ git push -u origin main
 
 | № | Что | Куда |
 |---|---|---|
-| 1 | `pytest -v` → 34 passed | конец 3.1 |
+| 1 | `pytest -v` → 37 passed | конец 3.1 |
 | 2 | `PLAY RECAP` плейбука | 3.2, «Автоматизация развертывания» |
 | 3 | поды всех пространств имён | 3.2, «Пространства имён» |
 | 4 | отказ PSA | 3.2, после таблицы 3 |
@@ -606,11 +610,10 @@ git push -u origin main
 
 ---
 
-## 16. Задел для главы 4
+## 16. Глава 4
 
-ВМ «пользователь» (`192.168.56.20`) и «нарушитель» (`192.168.56.30`) создаются по разделам 3–5: 2 ГБ ОЗУ, 2 ЦП,
-адаптер 2 — та же host-only сеть. Они обращаются к шлюзу `https://192.168.56.10:8443`, поэтому `expose-gateway.sh`
-должен быть запущен. Калибровку из 11.4 повтори с ВМ «пользователь».
+Испытательный стенд из трёх ВМ (нарушитель, пользователь, сервер), серии атак, Prometheus и Grafana —
+в отдельной методичке [GUIDE-chapter4.md](GUIDE-chapter4.md).
 
 ---
 
@@ -623,6 +626,9 @@ git push -u origin main
 | `kubectl ... localhost:8080 connection refused` | minikube ещё запускается — подожди |
 | `RSRC_INSUFFICIENT_CONTAINER_MEMORY` | у ВМ мало ОЗУ для `minikube_memory_mb` — уменьши значение (раздел 9) или добавь ОЗУ ВМ |
 | `oracle-0` долго `ContainerCreating` | качается образ ~1,5–2 ГБ — `kubectl -n wg-data get events -w`, ждать `Pulled` |
+| `oracle-0` в `ImagePullBackOff` | не удалось скачать образ: `docker pull gvenzl/oracle-free:23-slim` → `minikube -p wifi-guard image load gvenzl/oracle-free:23-slim` (5–15 мин, без вывода) → `kubectl -n wg-data delete pod oracle-0` |
+| в логах auth/registry/audit `ORA-01017: invalid credential` | пользователь WIFIGUARD не создан (первый старт Oracle был прерван): запусти плейбук ещё раз — шаг «Убедиться, что в Oracle есть пользователь» создаст его и перезапустит сервисы |
+| `gateway` `1/3` или `2/3`, `CrashLoopBackOff` | медленная ВМ не укладывалась в тайм-аут проверки живости — в текущей версии манифестов тайм-ауты увеличены; примени их: `kubectl apply -k ~/wifi-guard/deploy/k8s` |
 | `ErrImagePull` у `wifi-guard/...` | образы не загружены в кластер: `minikube -p wifi-guard image ls \| grep wifi-guard` (должно быть 7) — перезапусти плейбук |
 | `client certificate required` у симулятора | старая версия `client_sim.py` — возьми из архива или папки «Курсовая» |
 | `WinError 10054` на Windows | старая версия `client_sim.py` (шла через системный прокси) или не запущен `expose-gateway.sh` |

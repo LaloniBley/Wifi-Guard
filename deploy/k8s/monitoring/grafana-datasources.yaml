@@ -1,0 +1,12 @@
+# Источник данных Grafana. Фиксированный uid нужен, чтобы дашборд,
+# загружаемый из файла, ссылался на этот источник при любом развертывании.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus.wg-monitoring.svc.cluster.local:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s      # совпадает с интервалом сбора метрик

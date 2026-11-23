@@ -8,3 +8,4 @@ certs/
 ansible/.secrets/
 *.db
 .ruff_cache/
+.coverage

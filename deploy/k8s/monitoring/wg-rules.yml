@@ -1,0 +1,109 @@
+# Правила Prometheus для метрик безопасности паттерна WiFi-Guard.
+#
+# Окна и пороги:
+#   1m  — окно для критических событий: при интервале сбора 15 с в него попадает
+#         4 замера, чего достаточно для вычисления прироста счётчика; оповещение
+#         формируется не позднее чем через 30 с после атаки (замер + вычисление);
+#   5m  — окно для слабых признаков (N1, N2) и показателей качества: сглаживает
+#         единичные события и совпадает с периодом обновления дашборда;
+#   15m, 10 попыток — перебор паролей: верхняя граница числа неуспешных попыток
+#         (10) и времени блокировки (15 мин) по ИАФ.4 (вариант «а») методического
+#         документа ФСТЭК России «Меры защиты информации в ГИС»;
+#   1 с — допустимая задержка шлюза: половина тайм-аута внутренних вызовов (2 с),
+#         при её превышении запас до отказа «закрыт при сбое» исчерпывается.
+groups:
+  - name: wifi-guard-security-metrics
+    interval: 15s
+    rules:
+      # М1. Интенсивность вердиктов по видам, событий в минуту
+      - record: wg:verdicts:per_minute
+        expr: sum by (verdict) (rate(wg_verdicts_total[1m])) * 60
+      # М2. Доля заблокированных запросов среди всех оценённых
+      - record: wg:block_share:5m
+        expr: >-
+          sum(rate(wg_verdicts_total{verdict="BLOCK"}[5m]))
+          / (sum(rate(wg_verdicts_total[5m])) > 0)
+      # М3. Доля подозрительных запросов (нагрузка на администратора безопасности)
+      - record: wg:suspicious_share:5m
+        expr: >-
+          sum(rate(wg_verdicts_total{verdict="SUSPICIOUS"}[5m]))
+          / (sum(rate(wg_verdicts_total[5m])) > 0)
+      # М4. Попытки использовать чужой или поддельный токен (сценарий С2)
+      - record: wg:token_attacks:5m
+        expr: sum(increase(wg_auth_failures_total{reason=~"binding_mismatch|token_invalid"}[5m]))
+      # М5. 95-й процентиль времени обработки запроса шлюзом (цена защиты)
+      - record: wg:gateway_latency_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(wg_gateway_latency_seconds_bucket[5m])))
+      # М6. Доля запросов, отклонённых по принципу «закрыт при сбое»
+      - record: wg:fail_closed_share:5m
+        expr: >-
+          sum(rate(wg_gateway_requests_total{status="503"}[5m]))
+          / (sum(rate(wg_gateway_requests_total[5m])) > 0)
+
+  - name: wifi-guard-security-alerts
+    interval: 15s
+    rules:
+      - alert: WgRogueAccessPoint
+        expr: sum(increase(wg_indicators_total{indicator=~"BSSID_UNTRUSTED|PMF_NOT_NEGOTIATED"}[1m])) > 0
+        labels: {severity: critical, threat: "УБИ.126", scenario: "C1"}
+        annotations:
+          summary: "Подключение через неподтверждённую точку доступа (K1/K2)"
+          description: "Сработали критические индикаторы подмены ТД, запросы заблокированы."
+
+      - alert: WgEvilTwinInAir
+        expr: sum(increase(wg_indicators_total{indicator="TWIN_IN_AIR"}[5m])) > 0
+        labels: {severity: warning, threat: "УБИ.126", scenario: "C1"}
+        annotations:
+          summary: "В эфире виден двойник доверенной точки доступа (N2)"
+          description: "Клиенты сообщают о сети с тем же SSID и чужим BSSID или клоне BSSID на другом канале."
+
+      - alert: WgRouteDeviation
+        expr: sum(increase(wg_indicators_total{indicator="HOPS_DEVIATION"}[5m])) > 0
+        labels: {severity: warning, threat: "УБИ.126"}
+        annotations:
+          summary: "Маршрут клиента отличается от эталона точки доступа (N1)"
+          description: "Число транзитных узлов не совпадает с эталоном: возможна ретрансляция трафика через узел нарушителя."
+
+      - alert: WgStolenToken
+        expr: sum(increase(wg_auth_failures_total{reason="binding_mismatch"}[1m])) > 0
+        labels: {severity: critical, threat: "УБИ.126", scenario: "C2"}
+        annotations:
+          summary: "Предъявлен токен, выданный другому устройству (С2)"
+          description: "Токен привязан к сертификату другого устройства: признак перехвата сессии."
+
+      - alert: WgForgedToken
+        expr: sum(increase(wg_auth_failures_total{reason="token_invalid"}[1m])) > 0
+        labels: {severity: critical, threat: "УБИ.126", scenario: "C2"}
+        annotations:
+          summary: "Предъявлен токен с неверной подписью"
+          description: "Подпись токена не проверяется: признак его подделки или изменения."
+
+      - alert: WgPasswordGuessing
+        expr: sum(increase(wg_auth_failures_total{reason="bad_credentials"}[15m])) >= 10
+        labels: {severity: warning}
+        annotations:
+          summary: "Подбор паролей: не менее 10 неуспешных входов за 15 минут"
+          description: "Превышен порог неуспешных попыток входа (ИАФ.4 ФСТЭК России)."
+
+      - alert: WgFailClosed
+        expr: sum(increase(wg_gateway_requests_total{status="503"}[5m])) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Шлюз отклоняет запросы: недоступен микросервис защиты"
+          description: "Зависимость шлюза недоступна, доступ к приложению закрыт (fail-closed)."
+
+      - alert: WgGatewaySlow
+        expr: wg:gateway_latency_seconds:p95_5m > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "95-й процентиль задержки шлюза больше 1 с"
+          description: "Задержка {{ $value | humanizeDuration }} приближается к тайм-ауту внутренних вызовов (2 с)."
+
+      - alert: WgAuditDown
+        expr: up{job="wifi-guard-audit"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Микросервис аудита недоступен"
+          description: "Метрики безопасности не собираются: мониторинг атак остановлен."

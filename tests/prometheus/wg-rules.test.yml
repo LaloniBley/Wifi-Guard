@@ -1,0 +1,103 @@
+# Модульные тесты правил Prometheus (глава 4): promtool test rules wg-rules.test.yml
+# Временной шаг рядов 15 с совпадает с интервалом сбора метрик.
+rule_files:
+  - ../../deploy/k8s/monitoring/wg-rules.yml
+evaluation_interval: 15s
+
+tests:
+  # 1. Легитимная работа: только вердикты ALLOW — ни одного оповещения
+  - interval: 15s
+    input_series:
+      - series: 'wg_verdicts_total{verdict="ALLOW",mode="request"}'
+        values: '0+4x40'
+      # нулевые ряды создаёт микросервис аудита при старте
+      - series: 'wg_verdicts_total{verdict="BLOCK",mode="request"}'
+        values: '0x40'
+      - series: 'wg_indicators_total{indicator="BSSID_UNTRUSTED",scenario="C1"}'
+        values: '0x40'
+      - series: 'wg_auth_failures_total{reason="binding_mismatch"}'
+        values: '0x40'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: WgRogueAccessPoint, exp_alerts: []}
+      - {eval_time: 5m, alertname: WgStolenToken, exp_alerts: []}
+    promql_expr_test:
+      - expr: wg:block_share:5m
+        eval_time: 5m
+        exp_samples: [{labels: 'wg:block_share:5m', value: 0}]
+
+  # 2. Сценарий С1: подключение через подменную ТД (K1) — оповещение за один замер
+  - interval: 15s
+    input_series:
+      - series: 'wg_indicators_total{indicator="BSSID_UNTRUSTED",scenario="C1"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: WgRogueAccessPoint
+        exp_alerts: []
+      - eval_time: 45s
+        alertname: WgRogueAccessPoint
+        exp_alerts:
+          - exp_labels: {severity: critical, threat: "УБИ.126", scenario: "C1"}
+            exp_annotations:
+              summary: "Подключение через неподтверждённую точку доступа (K1/K2)"
+              description: "Сработали критические индикаторы подмены ТД, запросы заблокированы."
+      # через минуту без новых атак оповещение снимается
+      - eval_time: 150s
+        alertname: WgRogueAccessPoint
+        exp_alerts: []
+
+  # 3. Сценарий С2: токен предъявлен с чужого устройства
+  - interval: 15s
+    input_series:
+      - series: 'wg_auth_failures_total{reason="binding_mismatch"}'
+        values: '0 0 1 2 2 2'
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: WgStolenToken
+        exp_alerts:
+          - exp_labels: {severity: critical, threat: "УБИ.126", scenario: "C2"}
+            exp_annotations:
+              summary: "Предъявлен токен, выданный другому устройству (С2)"
+              description: "Токен привязан к сертификату другого устройства: признак перехвата сессии."
+
+  # 4. Подбор паролей: 9 ошибок за 15 минут — норма, 12 — оповещение
+  - interval: 15s
+    input_series:
+      - series: 'wg_auth_failures_total{reason="bad_credentials"}'
+        values: '0 1 2 3 4 5 6 7 8 9 9 9 10 11 12 12'
+    alert_rule_test:
+      - {eval_time: 150s, alertname: WgPasswordGuessing, exp_alerts: []}
+      - eval_time: 225s
+        alertname: WgPasswordGuessing
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Подбор паролей: не менее 10 неуспешных входов за 15 минут"
+              description: "Превышен порог неуспешных попыток входа (ИАФ.4 ФСТЭК России)."
+
+  # 5. Доля блокировок: 1 BLOCK на 3 ALLOW = 25 %
+  - interval: 15s
+    input_series:
+      - series: 'wg_verdicts_total{verdict="BLOCK",mode="request"}'
+        values: '0+1x40'
+      - series: 'wg_verdicts_total{verdict="ALLOW",mode="request"}'
+        values: '0+3x40'
+    promql_expr_test:
+      - expr: wg:block_share:5m
+        eval_time: 5m
+        exp_samples: [{labels: 'wg:block_share:5m', value: 0.25}]
+
+  # 6. Отказ аудита: оповещение через 1 мин недоступности
+  - interval: 15s
+    input_series:
+      - series: 'up{job="wifi-guard-audit"}'
+        values: '1 1 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - {eval_time: 60s, alertname: WgAuditDown, exp_alerts: []}
+      - eval_time: 105s
+        alertname: WgAuditDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: wifi-guard-audit}
+            exp_annotations:
+              summary: "Микросервис аудита недоступен"
+              description: "Метрики безопасности не собираются: мониторинг атак остановлен."

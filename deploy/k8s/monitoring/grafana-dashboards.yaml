@@ -1,0 +1,11 @@
+# Загрузка дашбордов из файлов: дашборд создаётся при каждом запуске Grafana
+# и не теряется при перезапуске пода (хранилище Grafana временное).
+apiVersion: 1
+providers:
+  - name: wifi-guard
+    folder: WiFi-Guard
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

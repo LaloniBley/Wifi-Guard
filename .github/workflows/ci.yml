@@ -1,6 +1,7 @@
 # Конвейер CI/CD на GitHub Actions:
 #   test     — статический анализ (ruff) и автотесты (pytest);
-#   manifests— проверка манифестов Kubernetes по схемам API (kubeconform);
+#   manifests— проверка манифестов Kubernetes по схемам API (kubeconform)
+#              и модульные тесты правил оповещения Prometheus (promtool);
 #   images   — сборка образов и публикация в GitHub Container Registry
 #              (только для ветки main, после успешных тестов).
 name: ci
@@ -22,7 +23,7 @@ jobs:
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements-dev.txt
       - run: ruff check common services client tests
-      - run: pytest -q
+      - run: pytest -q --cov=common --cov=services --cov-report=term
 
   manifests:
     runs-on: ubuntu-latest
@@ -32,6 +33,11 @@ jobs:
         run: |
           curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
           kubectl kustomize deploy/k8s | ./kubeconform -strict -summary -kubernetes-version 1.31.0 -
+      - name: promtool
+        run: |
+          curl -sSL https://github.com/prometheus/prometheus/releases/download/v2.55.1/prometheus-2.55.1.linux-amd64.tar.gz | tar xz
+          ./prometheus-2.55.1.linux-amd64/promtool check rules deploy/k8s/monitoring/wg-rules.yml
+          ./prometheus-2.55.1.linux-amd64/promtool test rules tests/prometheus/wg-rules.test.yml
 
   images:
     if: github.ref == 'refs/heads/main'

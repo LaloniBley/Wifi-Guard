@@ -15,8 +15,20 @@ configMapGenerator:
   - name: gateway-nginx
     namespace: wg-edge
     files: [nginx.conf]
-generatorOptions:
-  disableNameSuffixHash: true
+    options: {disableNameSuffixHash: true}
+  # конфигурация мониторинга (глава 4): имя ConfigMap содержит хеш содержимого
+  - name: prometheus-config
+    namespace: wg-monitoring
+    files: [monitoring/prometheus.yml, monitoring/wg-rules.yml]
+  - name: grafana-datasources
+    namespace: wg-monitoring
+    files: [monitoring/grafana-datasources.yaml]
+  - name: grafana-dashboard-provider
+    namespace: wg-monitoring
+    files: [monitoring/grafana-dashboards.yaml]
+  - name: grafana-dashboards
+    namespace: wg-monitoring
+    files: [monitoring/wifi-guard-security.json]
 # образы собираются в minikube (Ansible); чтобы брать опубликованные GitHub Actions
 # образы из ghcr.io, задайте newName: ghcr.io/lalonibley/wifi-guard-<сервис>:
 images:
